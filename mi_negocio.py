@@ -1,20 +1,13 @@
 """
-Mi Negocio - Flet + Supabase (Con Ventana de Descarga de Excel)
-
-Versiones probadas: flet==0.28.3, supabase>=2.9, openpyxl>=3.1
-Ejecutar en PC:  pip install "flet==0.28.3" "supabase>=2.9" openpyxl && python mi_negocio_flet.py
-Empaquetar APK:  en pyproject.toml -> dependencies = ["flet==0.28.3", "supabase", "openpyxl"]
+Mi Negocio - Flet + Supabase (Tiempo Real + Botón Recargar + Lógica Blindada)
 """
 import asyncio
+import os
+import tempfile
 from datetime import date
 
 import flet as ft
 from supabase import AsyncClient, acreate_client
-
-# Librerías para generación de Excel estilizado
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 # ====================== CREDENCIALES SUPABASE ======================
 SUPABASE_URL = "https://pgzpuysruhogvhiinzor.supabase.co"
@@ -22,7 +15,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # ===================================================================
 
 MONEDA = "S/"
-TABLAS = ("productos", "ventas", "gastos", "config")
+TABLAS = ("productos", "ventas_v2", "venta_items", "pagos", "gastos", "config")
 VERDE = ft.Colors.TEAL_700
 LIMITE_LISTA = 100
 
@@ -39,7 +32,6 @@ def num(texto, defecto=None):
 
 
 async def traer_todo(client: AsyncClient, tabla: str, columnas="*", orden="id"):
-    """Trae todas las filas de la tabla."""
     filas, desde, paso = [], 0, 1000
     while True:
         r = (
@@ -63,25 +55,33 @@ async def main(page: ft.Page):
     page.bgcolor = ft.Colors.BLUE_GREY_50
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
 
-    if "TU-PROYECTO" in SUPABASE_URL or "TU-ANON" in SUPABASE_KEY:
-        page.add(
-            ft.SafeArea(
-                ft.Container(
-                    padding=24,
-                    content=ft.Text(
-                        "⚠️ Pega tu SUPABASE_URL y SUPABASE_KEY al inicio del archivo.",
-                        size=20,
-                    ),
-                )
-            )
-        )
-        return
-
     client: AsyncClient = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
 
-    # ------------------------------------------------------------------ estado
-    estado = {"capital": 0.0, "productos": [], "ventas": [], "gastos": []}
+    # Estado de la app
+    estado = {"capital": 0.0, "productos": [], "ventas": [], "pagos": [], "gastos": []}
+    carrito_actual = []
     lock = asyncio.Lock()
+
+    # ==================== INDICADOR DE CONEXIÓN ====================
+    txt_conexion = ft.Text("Conectando...", size=12, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
+    icon_conexion = ft.Icon(ft.Icons.WIFI_FIND, size=14, color=ft.Colors.WHITE)
+    badge_conexion = ft.Container(
+        content=ft.Row([icon_conexion, txt_conexion], spacing=4),
+        bgcolor=ft.Colors.ORANGE_700,
+        padding=ft.padding.symmetric(horizontal=8, vertical=4),
+        border_radius=12,
+    )
+
+    def set_conexion(online: bool):
+        if online:
+            badge_conexion.bgcolor = ft.Colors.GREEN_700
+            icon_conexion.name = ft.Icons.WIFI
+            txt_conexion.value = "Conectado"
+        else:
+            badge_conexion.bgcolor = ft.Colors.RED_700
+            icon_conexion.name = ft.Icons.WIFI_OFF
+            txt_conexion.value = "Sin internet"
+        page.update()
 
     def aviso(texto, error=False):
         page.open(
@@ -92,7 +92,6 @@ async def main(page: ft.Page):
         )
 
     def abrir_calendario(campo_destino):
-        """Abre un calendario flotante para seleccionar fecha fácilmente."""
         def al_seleccionar_fecha(e):
             if e.control.value:
                 campo_destino.value = e.control.value.strftime("%Y-%m-%d")
@@ -106,21 +105,21 @@ async def main(page: ft.Page):
             )
         )
 
-    # ---------------------------------------------------------------- resumen
+    # ==================== RESUMEN Y TARJETAS ORIGINALES ====================
     def resumen():
         v = estado["ventas"]
-        vendido = sum((x["cantidad"] or 0) * (x["precio"] or 0) for x in v)
-        cobrado = sum((x["cantidad"] or 0) * (x["precio"] or 0) for x in v if x["pagado"] == 1)
-        gastos = sum(x["monto"] or 0 for x in estado["gastos"])
+        vendido = round(sum(x["total"] or 0 for x in v), 2)
+        cobrado = round(sum(p["monto"] or 0 for p in estado["pagos"]), 2)
+        gastos = round(sum(x["monto"] or 0 for x in estado["gastos"]), 2)
         capital = estado["capital"]
         return dict(
             capital=capital,
             vendido=vendido,
             cobrado=cobrado,
-            por_cobrar=vendido - cobrado,
+            por_cobrar=round(vendido - cobrado, 2),
             gastos=gastos,
-            ganancia=cobrado - gastos,
-            caja=capital + cobrado - gastos,
+            ganancia=round(cobrado - gastos, 2),
+            caja=round(capital + cobrado - gastos, 2),
         )
 
     def tarjeta(titulo, valor, color, grande=False):
@@ -155,7 +154,6 @@ async def main(page: ft.Page):
             ], spacing=6),
         ]
 
-    # --------------------------------------------------------- confirmar borrado
     def confirmar_borrado(tabla, id_, texto):
         async def si(e):
             page.close(dlg)
@@ -190,60 +188,40 @@ async def main(page: ft.Page):
         )
 
     def boton(texto, icono, accion, color=ft.Colors.TEAL_800):
-        return ft.Row(
-            [
-                ft.FilledButton(
-                    texto,
-                    icon=icono,
-                    on_click=accion,
-                    height=48,
-                    style=ft.ButtonStyle(
-                        shape=ft.RoundedRectangleBorder(radius=12),
-                        bgcolor=color,
-                    ),
-                    expand=True,
-                )
-            ]
-        )
+        return ft.Row([
+            ft.FilledButton(
+                texto,
+                icon=icono,
+                on_click=accion,
+                height=48,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=color),
+                expand=True,
+            )
+        ])
 
-    # ======================================================================
-    #                 GENERACIÓN DE REPORTE CON FILEPICKER
-    # ======================================================================
-    def guardar_excel_archivo(e: ft.FilePickerResultEvent):
-        """Callback ejecutado cuando el usuario selecciona la ruta de guardado."""
-        if not e.path:
-            return
-        
-        ruta_destino = e.path
-        if not ruta_destino.endswith(".xlsx"):
-            ruta_destino += ".xlsx"
-
+    # ==================== EXPORTACIÓN A EXCEL SIN ERRORES ====================
+    def exportar_excel(e=None):
         try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+
             wb = openpyxl.Workbook()
-            
-            # Estilos visuales
             HEADER_FILL = PatternFill(start_color="004D40", end_color="004D40", fill_type="solid")
             HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
             TITLE_FONT = Font(name="Calibri", size=16, bold=True, color="004D40")
             BOLD_FONT = Font(name="Calibri", size=11, bold=True)
-            THIN_BORDER = Border(
-                left=Side(style='thin', color='DDDDDD'),
-                right=Side(style='thin', color='DDDDDD'),
-                top=Side(style='thin', color='DDDDDD'),
-                bottom=Side(style='thin', color='DDDDDD')
-            )
+            THIN_BORDER = Border(left=Side(style='thin', color='DDDDDD'), right=Side(style='thin', color='DDDDDD'), top=Side(style='thin', color='DDDDDD'), bottom=Side(style='thin', color='DDDDDD'))
             FORMATO_MONEDA = '"S/" #,##0.00'
 
-            # ---------------- 1. Pestaña Resumen
+            # 1. Resumen
             ws_resumen = wb.active
             ws_resumen.title = "Resumen General"
             ws_resumen.views.sheetView[0].showGridLines = True
-            
             ws_resumen.append(["REPORTE GENERAL DEL NEGOCIO"])
             ws_resumen.cell(row=1, column=1).font = TITLE_FONT
             ws_resumen.append([f"Fecha de emisión: {date.today()}"])
             ws_resumen.append([])
-            
             ws_resumen.append(["Indicador Financiero", "Monto"])
             r = resumen()
             indicadores = [
@@ -257,119 +235,39 @@ async def main(page: ft.Page):
             ]
             for ind, val in indicadores:
                 ws_resumen.append([ind, val])
-                
             for col in range(1, 3):
                 cell = ws_resumen.cell(row=4, column=col)
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                
+                cell.fill, cell.font, cell.alignment = HEADER_FILL, HEADER_FONT, Alignment(horizontal="center", vertical="center")
             for row in range(5, 5 + len(indicadores)):
-                c1 = ws_resumen.cell(row=row, column=1)
-                c2 = ws_resumen.cell(row=row, column=2)
-                c1.border = THIN_BORDER
-                c2.border = THIN_BORDER
+                c1, c2 = ws_resumen.cell(row=row, column=1), ws_resumen.cell(row=row, column=2)
+                c1.border, c2.border = THIN_BORDER, THIN_BORDER
                 c2.number_format = FORMATO_MONEDA
-                if row == 5 + len(indicadores) - 1:
-                    c1.font = BOLD_FONT
-                    c2.font = BOLD_FONT
 
-            # ---------------- 2. Pestaña Ventas
+            # 2. Ventas
             ws_ventas = wb.create_sheet(title="Ventas")
             ws_ventas.views.sheetView[0].showGridLines = True
-            ws_ventas.append(["Fecha", "Cliente", "Producto", "Cantidad", "Precio Unitario", "Total", "Estado"])
-            for col in range(1, 8):
-                cell = ws_ventas.cell(row=1, column=col)
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                
-            for v in estado["ventas"]:
-                cant = v["cantidad"] or 0
-                prec = v["precio"] or 0
-                total = cant * prec
-                estado_txt = "PAGADO" if v["pagado"] == 1 else "PENDIENTE"
-                ws_ventas.append([v["fecha"], v["cliente"], v["producto"], cant, prec, total, estado_txt])
-                
-            for row in range(2, ws_ventas.max_row + 1):
-                for col in range(1, 8):
-                    c = ws_ventas.cell(row=row, column=col)
-                    c.border = THIN_BORDER
-                    if col in (5, 6):
-                        c.number_format = FORMATO_MONEDA
-                    if col == 7:
-                        c.alignment = Alignment(horizontal="center")
-                        c.font = Font(color="008000" if c.value == "PAGADO" else "D97706", bold=True)
-
-            # ---------------- 3. Pestaña Gastos
-            ws_gastos = wb.create_sheet(title="Gastos")
-            ws_gastos.views.sheetView[0].showGridLines = True
-            ws_gastos.append(["Fecha", "Concepto", "Monto"])
-            for col in range(1, 4):
-                cell = ws_gastos.cell(row=1, column=col)
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                
-            for g in estado["gastos"]:
-                ws_gastos.append([g["fecha"], g["concepto"], g["monto"] or 0])
-                
-            for row in range(2, ws_gastos.max_row + 1):
-                for col in range(1, 4):
-                    c = ws_gastos.cell(row=row, column=col)
-                    c.border = THIN_BORDER
-                    if col == 3:
-                        c.number_format = FORMATO_MONEDA
-
-            # ---------------- 4. Pestaña Productos
-            ws_prods = wb.create_sheet(title="Productos")
-            ws_prods.views.sheetView[0].showGridLines = True
-            ws_prods.append(["Nombre", "Precio Venta", "Costo", "Ganancia x Unid."])
+            ws_ventas.append(["Fecha", "Cliente", "Total", "Estado"])
             for col in range(1, 5):
-                cell = ws_prods.cell(row=1, column=col)
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                
-            for p in estado["productos"]:
-                pv = p["precio"] or 0
-                pc = p["costo"] or 0
-                ws_prods.append([p["nombre"], pv, pc, pv - pc])
-                
-            for row in range(2, ws_prods.max_row + 1):
-                for col in range(1, 5):
-                    c = ws_prods.cell(row=row, column=col)
-                    c.border = THIN_BORDER
-                    if col in (2, 3, 4):
-                        c.number_format = FORMATO_MONEDA
+                cell = ws_ventas.cell(row=1, column=col)
+                cell.fill, cell.font, cell.alignment = HEADER_FILL, HEADER_FONT, Alignment(horizontal="center", vertical="center")
+            for v in estado["ventas"]:
+                ws_ventas.append([v["fecha"], v["cliente"], v["total"], v["estado"]])
 
-            # Auto-ajuste de anchos de columna
-            for ws in [ws_resumen, ws_ventas, ws_gastos, ws_prods]:
+            for ws in [ws_resumen, ws_ventas]:
                 for col in ws.columns:
                     max_len = max(len(str(cell.value or '')) for cell in col)
                     col_letter = get_column_letter(col[0].column)
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
-            wb.save(ruta_destino)
-            aviso("¡Reporte en Excel generado con éxito! 📊")
-
+            nombre_archivo = f"Reporte_Mi_Negocio_{date.today().strftime('%Y%m%d')}.xlsx"
+            ruta_temp = os.path.join(tempfile.gettempdir(), nombre_archivo)
+            wb.save(ruta_temp)
+            aviso(f"Reporte generado en:\n{ruta_temp}")
         except Exception as ex:
             aviso(f"Error al generar Excel: {ex}", True)
 
-    # Componente de FilePicker para solicitar ubicación de guardado
-    file_picker = ft.FilePicker(on_result=guardar_excel_archivo)
-    page.overlay.append(file_picker)
-
-    def solicitar_guardar_excel(e=None):
-        nombre_defecto = f"Reporte_Mi_Negocio_{date.today().strftime('%Y%m%d')}.xlsx"
-        file_picker.save_file(
-            file_name=nombre_defecto,
-            allowed_extensions=["xlsx"],
-            dialog_title="Guardar Reporte Excel",
-        )
-
     # ======================================================================
-    #                               VENTAS
+    #                               VENTAS CON CARRITO
     # ======================================================================
     def al_cambiar_producto(e=None):
         if v_producto.value:
@@ -393,7 +291,7 @@ async def main(page: ft.Page):
     v_cliente = campo("Nombre del cliente", capitalization=ft.TextCapitalization.WORDS)
     v_producto = ft.Dropdown(
         label="Producto",
-        hint_text="Seleccionar producto...",
+        hint_text="Seleccionar...",
         border_radius=12,
         filled=True,
         bgcolor=ft.Colors.WHITE,
@@ -405,55 +303,167 @@ async def main(page: ft.Page):
         on_change=al_cambiar_producto,
         expand=True,
     )
-    v_cantidad = campo("Cantidad", value="1", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
-    v_precio = campo("Precio de venta", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
-    v_pagado = ft.Switch(value=False, active_color=ft.Colors.TEAL_700)
+    v_cantidad = campo("Cant.", value="1", keyboard_type=ft.KeyboardType.NUMBER, width=90)
+    v_precio = campo("Precio U.", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
+    v_monto_pago = campo("¿Cuánto paga hoy? (S/)", keyboard_type=ft.KeyboardType.NUMBER)
 
-    v_pagado_container = ft.Container(
-        content=ft.Row(
-            [
-                ft.Text("¿Ya pagó el cliente?", size=15, color=ft.Colors.GREY_800),
-                v_pagado,
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        ),
-        padding=ft.padding.symmetric(horizontal=4),
-    )
+    lista_items_carrito = ft.Column(spacing=2)
+    txt_subtotal_carrito = ft.Text("Total Venta: S/ 0.00", size=16, weight=ft.FontWeight.BOLD, color=VERDE)
 
-    lista_ventas = ft.Column(spacing=0)
+    def actualizar_ui_carrito():
+        lista_items_carrito.controls.clear()
+        tot = round(sum(i["subtotal"] for i in carrito_actual), 2)
+        for idx, item in enumerate(carrito_actual):
+            lista_items_carrito.controls.append(
+                ft.Row([
+                    ft.Text(f"• {item['cant']}x {item['prod']}", size=14, expand=True),
+                    ft.Text(money(item['subtotal']), size=14, weight=ft.FontWeight.BOLD),
+                    ft.IconButton(ft.Icons.CLOSE, icon_size=18, icon_color=ft.Colors.RED_400, on_click=lambda e, i=idx: quitar_item(i))
+                ])
+            )
+        txt_subtotal_carrito.value = f"Total Venta: {money(tot)}"
+        page.update()
 
-    async def guardar_venta(e):
+    def quitar_item(idx):
+        carrito_actual.pop(idx)
+        actualizar_ui_carrito()
+
+    def agregar_al_carrito_click(e):
         cant = num(v_cantidad.value)
-        if not v_producto.value or not cant or cant <= 0:
-            aviso("Elige un producto y la cantidad", True)
+        prec = num(v_precio.value)
+        if not v_producto.value or not cant or cant <= 0 or prec is None or prec < 0:
+            aviso("Selecciona producto, cantidad y precio válido", True)
             return
-        precio = num(v_precio.value)
-        if precio is None:
-            p = next((x for x in estado["productos"] if x["nombre"] == v_producto.value), None)
-            precio = p["precio"] if p else 0
-        try:
-            await client.table("ventas").insert(
-                {
-                    "fecha": v_fecha.value or str(date.today()),
-                    "cliente": (v_cliente.value or "").strip() or "Sin nombre",
-                    "producto": v_producto.value,
-                    "cantidad": cant,
-                    "precio": precio,
-                    "pagado": 1 if v_pagado.value else 0,
-                }
-            ).execute()
-        except Exception as ex:
-            aviso(f"Error: {ex}", True)
-            return
-
-        v_cliente.value = ""
+        
+        carrito_actual.append({
+            "prod": v_producto.value,
+            "cant": cant,
+            "precio": prec,
+            "subtotal": round(cant * prec, 2)
+        })
         v_producto.value = None
         v_cantidad.value = "1"
         v_precio.value = ""
-        v_pagado.value = False
+        actualizar_ui_carrito()
 
-        aviso("Venta guardada ✅")
-        await refrescar()
+    lista_ventas = ft.Column(spacing=0)
+
+    btn_guardar_venta = ft.FilledButton(
+        "Guardar venta completa",
+        icon=ft.Icons.CHECK,
+        height=48,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800),
+        expand=True,
+    )
+
+    async def guardar_venta(e):
+        if not carrito_actual:
+            aviso("Agrega al menos un producto al ticket", True)
+            return
+
+        total_venta = round(sum(i["subtotal"] for i in carrito_actual), 2)
+        monto_pagado = round(num(v_monto_pago.value, 0.0), 2)
+
+        if monto_pagado < 0:
+            aviso("El monto pagado no puede ser negativo", True)
+            return
+
+        if monto_pagado > total_venta:
+            aviso("El monto pagado no puede superar el total", True)
+            return
+
+        estado_pago = "PAGADO" if abs(monto_pagado - total_venta) < 0.01 else ("PARCIAL" if monto_pagado > 0 else "PENDIENTE")
+
+        btn_guardar_venta.disabled = True
+        btn_guardar_venta.content = ft.ProgressRing(width=20, height=20, stroke_width=2, color=ft.Colors.WHITE)
+        page.update()
+
+        try:
+            # 1. Insertar Cabecera
+            res = await client.table("ventas_v2").insert({
+                "fecha": v_fecha.value or str(date.today()),
+                "cliente": (v_cliente.value or "").strip() or "Cliente General",
+                "total": total_venta,
+                "estado": estado_pago
+            }).execute()
+            venta_id = res.data[0]["id"]
+
+            # 2. Insertar Ítems
+            items_db = [{
+                "venta_id": venta_id,
+                "producto": item["prod"],
+                "cantidad": item["cant"],
+                "precio_unitario": item["precio"],
+                "subtotal": item["subtotal"]
+            } for item in carrito_actual]
+            await client.table("venta_items").insert(items_db).execute()
+
+            # 3. Insertar Pago Inicial
+            if monto_pagado > 0:
+                await client.table("pagos").insert({
+                    "venta_id": venta_id,
+                    "fecha": v_fecha.value or str(date.today()),
+                    "monto": monto_pagado
+                }).execute()
+
+            carrito_actual.clear()
+            v_cliente.value = ""
+            v_monto_pago.value = ""
+            actualizar_ui_carrito()
+            aviso("¡Venta guardada exitosamente! ✅")
+            await refrescar()
+
+        except Exception as ex:
+            aviso(f"Error: {ex}", True)
+        finally:
+            btn_guardar_venta.disabled = False
+            btn_guardar_venta.content = None
+            page.update()
+
+    btn_guardar_venta.on_click = guardar_venta
+
+    # ================= VENTANA FLOTANTE PARA REGISTRAR ABONOS =================
+    def abrir_dialogo_abono(venta, saldo_pendiente):
+        input_monto = campo("Monto que te paga hoy (S/)", value=f"{saldo_pendiente:g}", keyboard_type=ft.KeyboardType.NUMBER)
+        
+        async def confirmar_pago(e):
+            monto_abono = round(num(input_monto.value, 0.0), 2)
+            if monto_abono <= 0 or monto_abono > saldo_pendiente + 0.01:
+                aviso("Ingresa un monto válido que no exceda la deuda", True)
+                return
+            
+            page.close(dlg)
+            try:
+                await client.table("pagos").insert({
+                    "venta_id": venta["id"],
+                    "fecha": str(date.today()),
+                    "monto": monto_abono
+                }).execute()
+
+                pagos_previos = round(sum(p["monto"] for p in estado["pagos"] if p["venta_id"] == venta["id"]), 2)
+                nuevo_total_pagado = round(pagos_previos + monto_abono, 2)
+                nuevo_estado = "PAGADO" if nuevo_total_pagado >= round(venta["total"] - 0.01, 2) else "PARCIAL"
+
+                await client.table("ventas_v2").update({"estado": nuevo_estado}).eq("id", venta["id"]).execute()
+                aviso("¡Pago/Abono registrado correctamente! 💸")
+                await refrescar()
+            except Exception as ex:
+                aviso(f"Error al registrar pago: {ex}", True)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"Abono de {venta['cliente']}"),
+            content=ft.Column([
+                ft.Text(f"Total venta: {money(venta['total'])}"),
+                ft.Text(f"Saldo pendiente: {money(saldo_pendiente)}", color=ft.Colors.RED_700, weight=ft.FontWeight.BOLD),
+                input_monto
+            ], tight=True, spacing=10),
+            actions=[
+                ft.TextButton("Cancelar", on_click=lambda e: page.close(dlg)),
+                ft.FilledButton("Guardar Pago", on_click=confirmar_pago, bgcolor=ft.Colors.GREEN_800)
+            ]
+        )
+        page.open(dlg)
 
     def pintar_ventas():
         if not estado["ventas"]:
@@ -461,20 +471,31 @@ async def main(page: ft.Page):
             return
         items = []
         for v in estado["ventas"][:LIMITE_LISTA]:
-            total = (v["cantidad"] or 0) * (v["precio"] or 0)
-            pagado = v["pagado"] == 1
+            pagos_hechos = round(sum(p["monto"] for p in estado["pagos"] if p["venta_id"] == v["id"]), 2)
+            falta = round(v["total"] - pagos_hechos, 2)
+            pagado_completo = v["estado"] == "PAGADO" or falta <= 0.01
 
-            async def alternar(e, id_=v["id"]):
-                try:
-                    await client.table("ventas").update({"pagado": 1 if e.control.value else 0}).eq("id", id_).execute()
-                    await refrescar()
-                except Exception as ex:
-                    aviso(f"Error: {ex}", True)
+            acciones_row = [
+                ft.IconButton(
+                    ft.Icons.DELETE_OUTLINE,
+                    icon_size=24,
+                    on_click=lambda e, i=v["id"], t=f"{v['cliente']} · {money(v['total'])}":
+                        confirmar_borrado("ventas_v2", i, t),
+                )
+            ]
+
+            if not pagado_completo:
+                acciones_row.insert(0, ft.TextButton(
+                    "💸 Registrar Pago",
+                    icon=ft.Icons.ATTACH_MONEY,
+                    icon_color=ft.Colors.GREEN_700,
+                    on_click=lambda e, venta=v, f=falta: abrir_dialogo_abono(venta, f)
+                ))
 
             items.append(
                 ft.Card(
                     content=ft.Container(
-                        border=ft.border.only(left=ft.BorderSide(6, ft.Colors.GREEN if pagado else ft.Colors.ORANGE)),
+                        border=ft.border.only(left=ft.BorderSide(6, ft.Colors.GREEN if pagado_completo else ft.Colors.ORANGE)),
                         border_radius=12,
                         padding=ft.padding.only(left=8, right=8, top=4, bottom=4),
                         content=ft.Column(
@@ -482,35 +503,15 @@ async def main(page: ft.Page):
                                 ft.ListTile(
                                     content_padding=0,
                                     leading=ft.Icon(
-                                        ft.Icons.CHECK_CIRCLE if pagado else ft.Icons.SCHEDULE,
-                                        color=ft.Colors.GREEN if pagado else ft.Colors.ORANGE,
+                                        ft.Icons.CHECK_CIRCLE if pagado_completo else ft.Icons.SCHEDULE,
+                                        color=ft.Colors.GREEN if pagado_completo else ft.Colors.ORANGE,
                                         size=28,
                                     ),
-                                    title=ft.Text(
-                                        f"{v['cliente']} · {v['producto']}",
-                                        weight=ft.FontWeight.W_500,
-                                        size=15,
-                                        overflow=ft.TextOverflow.ELLIPSIS,
-                                    ),
-                                    subtitle=ft.Text(
-                                        f"{v['fecha']} · {v['cantidad']:g} × {money(v['precio'] or 0)}",
-                                        overflow=ft.TextOverflow.ELLIPSIS,
-                                    ),
-                                    trailing=ft.Text(money(total), size=16, weight=ft.FontWeight.BOLD),
+                                    title=ft.Text(f"{v['cliente']}", weight=ft.FontWeight.W_500, size=15),
+                                    subtitle=ft.Text(f"{v['fecha']} · Estado: {v['estado']}" + (f" (Falta {money(falta)})" if falta > 0.01 else "")),
+                                    trailing=ft.Text(money(v["total"]), size=16, weight=ft.FontWeight.BOLD),
                                 ),
-                                ft.Row(
-                                    [
-                                        ft.Text("Pagó", size=14, color=ft.Colors.GREY_700),
-                                        ft.Switch(value=pagado, on_change=alternar, active_color=ft.Colors.GREEN),
-                                        ft.IconButton(
-                                            ft.Icons.DELETE_OUTLINE,
-                                            icon_size=24,
-                                            on_click=lambda e, i=v["id"], t=f"{v['cliente']} · {money(total)}":
-                                                confirmar_borrado("ventas", i, t),
-                                        ),
-                                    ],
-                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                ),
+                                ft.Row(acciones_row, alignment=ft.MainAxisAlignment.SPACE_BETWEEN if len(acciones_row) > 1 else ft.MainAxisAlignment.END),
                             ],
                             spacing=0,
                         ),
@@ -526,13 +527,17 @@ async def main(page: ft.Page):
                     padding=14,
                     content=ft.Column(
                         [
-                            ft.Text("Nueva venta", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("Nueva venta (Multiproducto)", size=18, weight=ft.FontWeight.BOLD),
                             ft.Row([v_fecha, btn_cal_ventas], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                             v_cliente,
                             ft.Row([v_producto]),
                             ft.Row([v_cantidad, v_precio], spacing=8),
-                            v_pagado_container,
-                            boton("Guardar venta", ft.Icons.ADD, guardar_venta),
+                            ft.OutlinedButton("＋ Agregar al ticket", on_click=agregar_al_carrito_click),
+                            ft.Divider(),
+                            lista_items_carrito,
+                            txt_subtotal_carrito,
+                            v_monto_pago,
+                            ft.Row([btn_guardar_venta]),
                         ],
                         spacing=10,
                     ),
@@ -557,21 +562,31 @@ async def main(page: ft.Page):
     g_monto = campo("Monto", keyboard_type=ft.KeyboardType.NUMBER)
     lista_gastos = ft.Column(spacing=0)
 
+    btn_guardar_gasto = ft.FilledButton("Guardar gasto", icon=ft.Icons.ADD, height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800), expand=True)
+
     async def guardar_gasto(e):
-        monto = num(g_monto.value)
-        if not g_concepto.value or not monto or monto <= 0:
-            aviso("Escribe el concepto y el monto", True)
+        monto = round(num(g_monto.value, 0.0), 2)
+        if not g_concepto.value or monto <= 0:
+            aviso("Escribe el concepto y un monto mayor a cero", True)
             return
+
+        btn_guardar_gasto.disabled = True
+        btn_guardar_gasto.content = ft.ProgressRing(width=20, height=20, stroke_width=2, color=ft.Colors.WHITE)
+        page.update()
+
         try:
-            await client.table("gastos").insert(
-                {"fecha": g_fecha.value or str(date.today()), "concepto": g_concepto.value.strip(), "monto": monto}
-            ).execute()
+            await client.table("gastos").insert({"fecha": g_fecha.value or str(date.today()), "concepto": g_concepto.value.strip(), "monto": monto}).execute()
+            g_concepto.value, g_monto.value = "", ""
+            aviso("Gasto guardado ✅")
+            await refrescar()
         except Exception as ex:
             aviso(f"Error: {ex}", True)
-            return
-        g_concepto.value, g_monto.value = "", ""
-        aviso("Gasto guardado ✅")
-        await refrescar()
+        finally:
+            btn_guardar_gasto.disabled = False
+            btn_guardar_gasto.content = None
+            page.update()
+
+    btn_guardar_gasto.on_click = guardar_gasto
 
     def pintar_gastos():
         if not estado["gastos"]:
@@ -583,42 +598,24 @@ async def main(page: ft.Page):
                     leading=ft.Icon(ft.Icons.PAYMENTS_OUTLINED, color=ft.Colors.RED_400, size=28),
                     title=ft.Text(g["concepto"], weight=ft.FontWeight.W_500, size=15, overflow=ft.TextOverflow.ELLIPSIS),
                     subtitle=ft.Text(g["fecha"]),
-                    trailing=ft.Row(
-                        [
-                            ft.Text(money(g["monto"] or 0), size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.RED_600),
-                            ft.IconButton(
-                                ft.Icons.DELETE_OUTLINE, icon_size=24,
-                                on_click=lambda e, i=g["id"], t=f"{g['concepto']} · {money(g['monto'] or 0)}":
-                                    confirmar_borrado("gastos", i, t),
-                            ),
-                        ],
-                        tight=True,
-                    ),
+                    trailing=ft.Row([
+                        ft.Text(money(g["monto"] or 0), size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.RED_600),
+                        ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_size=24, on_click=lambda e, i=g["id"], t=f"{g['concepto']} · {money(g['monto'] or 0)}": confirmar_borrado("gastos", i, t)),
+                    ], tight=True),
                 )
             )
             for g in estado["gastos"][:LIMITE_LISTA]
         ]
 
-    tab_gastos = ft.Column(
-        [
-            ft.Card(
-                content=ft.Container(
-                    padding=14,
-                    content=ft.Column(
-                        [
-                            ft.Text("Nuevo gasto", size=18, weight=ft.FontWeight.BOLD),
-                            ft.Row([g_fecha, btn_cal_gastos], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                            g_concepto, g_monto,
-                            boton("Guardar gasto", ft.Icons.ADD, guardar_gasto),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            ),
-            lista_gastos,
-        ],
-        scroll=ft.ScrollMode.AUTO, expand=True, spacing=8,
-    )
+    tab_gastos = ft.Column([
+        ft.Card(content=ft.Container(padding=14, content=ft.Column([
+            ft.Text("Nuevo gasto", size=18, weight=ft.FontWeight.BOLD),
+            ft.Row([g_fecha, btn_cal_gastos], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            g_concepto, g_monto,
+            ft.Row([btn_guardar_gasto]),
+        ], spacing=10))),
+        lista_gastos,
+    ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
 
     # ======================================================================
     #                             PRODUCTOS
@@ -628,21 +625,31 @@ async def main(page: ft.Page):
     p_costo = campo("Lo que me cuesta", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
     lista_productos = ft.Column(spacing=0)
 
+    btn_guardar_producto = ft.FilledButton("Guardar producto", icon=ft.Icons.ADD, height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800), expand=True)
+
     async def guardar_producto(e):
         nombre, precio = (p_nombre.value or "").strip(), num(p_precio.value)
-        if not nombre or precio is None:
-            aviso("Escribe el nombre y el precio", True)
+        if not nombre or precio is None or precio < 0:
+            aviso("Escribe un nombre y un precio válido", True)
             return
+
+        btn_guardar_producto.disabled = True
+        btn_guardar_producto.content = ft.ProgressRing(width=20, height=20, stroke_width=2, color=ft.Colors.WHITE)
+        page.update()
+
         try:
-            await client.table("productos").upsert(
-                {"nombre": nombre, "precio": precio, "costo": num(p_costo.value, 0)}, on_conflict="nombre"
-            ).execute()
+            await client.table("productos").upsert({"nombre": nombre, "precio": precio, "costo": num(p_costo.value, 0)}, on_conflict="nombre").execute()
+            p_nombre.value, p_precio.value, p_costo.value = "", "", ""
+            aviso("Producto guardado ✅")
+            await refrescar()
         except Exception as ex:
             aviso(f"Error: {ex}", True)
-            return
-        p_nombre.value, p_precio.value, p_costo.value = "", "", ""
-        aviso("Producto guardado ✅")
-        await refrescar()
+        finally:
+            btn_guardar_producto.disabled = False
+            btn_guardar_producto.content = None
+            page.update()
+
+    btn_guardar_producto.on_click = guardar_producto
 
     def pintar_productos():
         if not estado["productos"]:
@@ -658,96 +665,70 @@ async def main(page: ft.Page):
                 content=ft.ListTile(
                     leading=ft.Icon(ft.Icons.INVENTORY_2_OUTLINED, color=VERDE, size=28),
                     title=ft.Text(p["nombre"], weight=ft.FontWeight.W_500, size=15, overflow=ft.TextOverflow.ELLIPSIS),
-                    subtitle=ft.Text(
-                        f"Precio {money(p['precio'] or 0)} · Me cuesta {money(p['costo'] or 0)}\n"
-                        f"Gano {money((p['precio'] or 0) - (p['costo'] or 0))}",
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
+                    subtitle=ft.Text(f"Precio {money(p['precio'] or 0)} · Me cuesta {money(p['costo'] or 0)}\nGano {money((p['precio'] or 0) - (p['costo'] or 0))}", overflow=ft.TextOverflow.ELLIPSIS),
                     is_three_line=True,
                     on_click=lambda e, p=p: editar(p),
-                    trailing=ft.IconButton(
-                        ft.Icons.DELETE_OUTLINE, icon_size=24,
-                        on_click=lambda e, i=p["id"], t=p["nombre"]: confirmar_borrado("productos", i, t),
-                    ),
+                    trailing=ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_size=24, on_click=lambda e, i=p["id"], t=p["nombre"]: confirmar_borrado("productos", i, t)),
                 )
             )
             for p in sorted(estado["productos"], key=lambda x: x["nombre"].lower())
         ]
 
-    tab_productos = ft.Column(
-        [
-            ft.Card(
-                content=ft.Container(
-                    padding=14,
-                    content=ft.Column(
-                        [
-                            ft.Text("Producto (si ya existe, se actualiza)", size=18, weight=ft.FontWeight.BOLD),
-                            p_nombre,
-                            ft.Row([p_precio, p_costo], spacing=8),
-                            boton("Guardar producto", ft.Icons.ADD, guardar_producto),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            ),
-            ft.Text("Toca un producto para editarlo", size=12, color=ft.Colors.GREY),
-            lista_productos,
-        ],
-        scroll=ft.ScrollMode.AUTO, expand=True, spacing=8,
-    )
+    tab_productos = ft.Column([
+        ft.Card(content=ft.Container(padding=14, content=ft.Column([
+            ft.Text("Producto (si ya existe, se actualiza)", size=18, weight=ft.FontWeight.BOLD),
+            p_nombre,
+            ft.Row([p_precio, p_costo], spacing=8),
+            ft.Row([btn_guardar_producto]),
+        ], spacing=10))),
+        ft.Text("Toca un producto para editarlo", size=12, color=ft.Colors.GREY),
+        lista_productos,
+    ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
 
     # ======================================================================
     #                               CAPITAL
     # ======================================================================
     c_capital = campo("Capital inicial", keyboard_type=ft.KeyboardType.NUMBER)
+    btn_guardar_capital = ft.FilledButton("Guardar capital", icon=ft.Icons.SAVE, height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800), expand=True)
 
     async def guardar_capital(e):
         valor = num(c_capital.value)
         if valor is None:
             aviso("Escribe un número válido", True)
             return
+
+        btn_guardar_capital.disabled = True
+        btn_guardar_capital.content = ft.ProgressRing(width=20, height=20, stroke_width=2, color=ft.Colors.WHITE)
+        page.update()
+
         try:
             await client.table("config").upsert({"clave": "capital", "valor": valor}, on_conflict="clave").execute()
+            aviso("Capital actualizado ✅")
+            await refrescar()
         except Exception as ex:
             aviso(f"Error: {ex}", True)
-            return
-        aviso("Capital actualizado ✅")
-        await refrescar()
+        finally:
+            btn_guardar_capital.disabled = False
+            btn_guardar_capital.content = None
+            page.update()
 
-    tab_capital = ft.Column(
-        [
-            ft.Card(
-                content=ft.Container(
-                    padding=14,
-                    content=ft.Column(
-                        [
-                            ft.Text("Configuración", size=18, weight=ft.FontWeight.BOLD),
-                            c_capital,
-                            boton("Guardar capital", ft.Icons.SAVE, guardar_capital),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            ),
-            ft.Card(
-                content=ft.Container(
-                    padding=14,
-                    content=ft.Column(
-                        [
-                            ft.Text("Reportes y Exportación", size=18, weight=ft.FontWeight.BOLD),
-                            ft.Text("Descarga un reporte detallado en Excel con tus ventas, gastos y resumen.", size=13, color=ft.Colors.GREY_700),
-                            boton("Exportar a Excel", ft.Icons.TABLE_CHART, solicitar_guardar_excel, color=ft.Colors.GREEN_800),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            ),
-        ],
-        scroll=ft.ScrollMode.AUTO, expand=True, spacing=8,
-    )
+    btn_guardar_capital.on_click = guardar_capital
+
+    tab_capital = ft.Column([
+        ft.Card(content=ft.Container(padding=14, content=ft.Column([
+            ft.Text("Configuración", size=18, weight=ft.FontWeight.BOLD),
+            c_capital,
+            ft.Row([btn_guardar_capital]),
+        ], spacing=10))),
+        ft.Card(content=ft.Container(padding=14, content=ft.Column([
+            ft.Text("Reportes y Exportación", size=18, weight=ft.FontWeight.BOLD),
+            ft.Text("Descarga un reporte detallado en Excel con tus ventas, gastos y resumen.", size=13, color=ft.Colors.GREY_700),
+            boton("Exportar a Excel", ft.Icons.TABLE_CHART, exportar_excel, color=ft.Colors.GREEN_800),
+        ], spacing=10))),
+    ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
 
     # ======================================================================
-    #                      CARGA DE DATOS Y TIEMPO REAL
+    #                      REFRESCO Y CONTROL DE CONEXIÓN
     # ======================================================================
     async def refrescar():
         async with lock:
@@ -755,10 +736,12 @@ async def main(page: ft.Page):
                 cfg = await client.table("config").select("valor").eq("clave", "capital").execute()
                 estado["capital"] = float(cfg.data[0]["valor"]) if cfg.data else 0.0
                 estado["productos"] = await traer_todo(client, "productos")
-                estado["ventas"] = await traer_todo(client, "ventas")
+                estado["ventas"] = await traer_todo(client, "ventas_v2")
+                estado["pagos"] = await traer_todo(client, "pagos")
                 estado["gastos"] = await traer_todo(client, "gastos")
-            except Exception as ex:
-                aviso(f"Sin conexión: {ex}", True)
+                set_conexion(True)
+            except Exception:
+                set_conexion(False)
                 return
 
             pintar_tarjetas()
@@ -787,20 +770,12 @@ async def main(page: ft.Page):
                 canal.on_postgres_changes("*", callback=hay_cambio, table=t, schema="public")
             await canal.subscribe()
         except Exception:
-            pass
+            set_conexion(False)
 
     async def sondeo():
         while True:
             await asyncio.sleep(20)
             await refrescar()
-
-    # ------------------------------------------------------------------ inicio
-    try:
-        existe = await client.table("config").select("clave").eq("clave", "capital").execute()
-        if not existe.data:
-            await client.table("config").insert({"clave": "capital", "valor": 120}).execute()
-    except Exception as ex:
-        aviso(f"No se pudo conectar a Supabase: {ex}", True)
 
     tabs = ft.Tabs(
         selected_index=0,
@@ -819,23 +794,28 @@ async def main(page: ft.Page):
             expand=True,
             content=ft.Container(
                 width=480,
-                content=ft.Column(
-                    [
-                        ft.Container(
-                            padding=ft.padding.only(left=4, right=4, top=4),
-                            content=ft.Text("🏪 Mi Negocio", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.TEAL_900),
-                        ),
-                        tarjetas,
-                        tabs,
-                    ],
-                    expand=True,
-                    spacing=6,
-                ),
-            ),
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text("🏪 Mi Negocio", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.TEAL_900),
+                        ft.Row([
+                            ft.IconButton(
+                                icon=ft.Icons.REFRESH,
+                                tooltip="Recargar datos",
+                                icon_color=ft.Colors.TEAL_800,
+                                icon_size=22,
+                                on_click=lambda _: page.run_task(refrescar)
+                            ),
+                            badge_conexion,
+                        ], spacing=2),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    tarjetas,
+                    tabs,
+                ], expand=True, spacing=6),
+            )
         )
     )
 
-    await refrescar()
+    page.run_task(refrescar)
     await suscribir_tiempo_real()
     page.run_task(sondeo)
 

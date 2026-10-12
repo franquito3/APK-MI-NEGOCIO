@@ -2,12 +2,12 @@
 Mi Negocio - Flet + Supabase (Generación de PDF y Ticket Digital)
 """
 import asyncio
-import os
-import tempfile
-from datetime import date
+import io
+import json
+import time
+from datetime import date, datetime
 
 import flet as ft
-from supabase import AsyncClient, acreate_client
 
 # ====================== CREDENCIALES SUPABASE ======================
 SUPABASE_URL = "https://pgzpuysruhogvhiinzor.supabase.co"
@@ -18,10 +18,13 @@ MONEDA = "S/"
 TABLAS = ("productos", "ventas_v2", "venta_items", "pagos", "gastos", "config")
 VERDE = ft.Colors.TEAL_700
 LIMITE_LISTA = 100
+BUCKET_REPORTES = "reportes"      # ver storage_setup.sql
+CLAVE_CACHE = "mi_negocio_cache_v1"
+INTERVALO_SONDEO = 90             # segundos (respaldo del tiempo real)
 
 
 def money(x: float) -> str:
-    return f"{MONEDA} {x:,.2f}"
+    return f"{MONEDA} {(x or 0):,.2f}"
 
 
 def num(texto, defecto=None):
@@ -31,7 +34,7 @@ def num(texto, defecto=None):
         return defecto
 
 
-async def traer_todo(client: AsyncClient, tabla: str, columnas="*", orden="id"):
+async def traer_todo(client, tabla: str, columnas="*", orden="id"):
     filas, desde, paso = [], 0, 1000
     while True:
         r = (
@@ -70,11 +73,18 @@ async def main(page: ft.Page):
         )
     )
     page.update()
+    await asyncio.sleep(0)  # deja que se pinte el splash antes del import pesado
 
-    client: AsyncClient = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
+    # Import diferido: supabase es lento de importar en el teléfono.
+    # Así el splash aparece de inmediato en vez de una pantalla en blanco.
+    from supabase import acreate_client
+
+    client = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
 
     # Estado de la app
     estado = {"capital": 0.0, "productos": [], "ventas": [], "pagos": [], "gastos": []}
+    pagos_por_venta = {}          # {venta_id: total pagado}, se recalcula en cada refresco
+    ultimo_refresco = {"t": 0.0}
     carga_inicial = True
     carrito_actual = []
     lock = asyncio.Lock()
@@ -88,7 +98,6 @@ async def main(page: ft.Page):
         padding=ft.padding.symmetric(horizontal=8, vertical=4),
         border_radius=12,
     )
-    
 
     def set_conexion(online: bool):
         if online:
@@ -139,6 +148,13 @@ async def main(page: ft.Page):
             ganancia=round(cobrado - gastos, 2),
             caja=round(capital + cobrado - gastos, 2),
         )
+
+    def recalcular_indices():
+        acumulado = {}
+        for p in estado["pagos"]:
+            acumulado[p["venta_id"]] = acumulado.get(p["venta_id"], 0.0) + (p["monto"] or 0)
+        pagos_por_venta.clear()
+        pagos_por_venta.update({k: round(v, 2) for k, v in acumulado.items()})
 
     def tarjeta(titulo, valor, color, grande=False):
         return ft.Card(
@@ -230,96 +246,137 @@ async def main(page: ft.Page):
         )
 
     # ==================== GENERADOR DE PDF Y TICKET DIGITAL ====================
-    async def generar_pdf_reporte(e=None):
-        try:
-            from reportlab.lib import colors
-            from reportlab.lib.pagesizes import A4
-            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    def construir_pdf_bytes(r: dict, ventas: list) -> bytes:
+        """Genera el PDF EN MEMORIA (sin tocar el disco). Se ejecuta en un hilo."""
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 
-            nombre_pdf = f"Reporte_Mi_Negocio_{date.today().strftime('%Y%m%d')}.pdf"
-            ruta_pdf = os.path.join(tempfile.gettempdir(), nombre_pdf)
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30,
+        )
+        elementos = []
+        styles = getSampleStyleSheet()
 
-            doc = SimpleDocTemplate(
-                ruta_pdf,
-                pagesize=A4,
-                rightMargin=30,
-                leftMargin=30,
-                topMargin=30,
-                bottomMargin=30,
+        titulo_style = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.HexColor("#004D40"), spaceAfter=10)
+        sub_style = ParagraphStyle("Subtitulo", parent=styles["Normal"], fontSize=10, textColor=colors.gray, spaceAfter=20)
+        h2_style = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=14, textColor=colors.HexColor("#004D40"), spaceBefore=15, spaceAfter=10)
+
+        # Sin emojis: Helvetica no los renderiza (saldrían como cuadros).
+        elementos.append(Paragraph("<b>Reporte General - Mi Negocio</b>", titulo_style))
+        elementos.append(Paragraph(f"Fecha de emisión: {date.today().strftime('%d/%m/%Y')}", sub_style))
+
+        data_resumen = [
+            ["Indicador Financiero", "Monto"],
+            ["Capital Inicial", money(r["capital"])],
+            ["Total Vendido", money(r["vendido"])],
+            ["Total Cobrado", money(r["cobrado"])],
+            ["Por Cobrar (Fiados)", money(r["por_cobrar"])],
+            ["Gastos Totales", money(r["gastos"])],
+            ["Ganancia Neta", money(r["ganancia"])],
+            ["Dinero en Caja Actual", money(r["caja"])],
+        ]
+        t_resumen = Table(data_resumen, colWidths=[280, 200])
+        t_resumen.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#004D40")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+                ]
             )
-            elementos = []
-            styles = getSampleStyleSheet()
+        )
+        elementos.append(t_resumen)
 
-            # Estilos personalizados
-            titulo_style = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.HexColor("#004D40"), spaceAfter=10)
-            sub_style = ParagraphStyle("Subtitulo", parent=styles["Normal"], fontSize=10, textColor=colors.gray, spaceAfter=20)
-            h2_style = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=14, textColor=colors.HexColor("#004D40"), spaceBefore=15, spaceAfter=10)
+        elementos.append(Paragraph("<b>Últimas Ventas</b>", h2_style))
+        data_ventas = [["Fecha", "Cliente", "Total", "Estado"]]
+        for v in ventas:
+            data_ventas.append([
+                str(v.get("fecha") or "-"),
+                str(v.get("cliente") or "-")[:40],
+                money(v.get("total") or 0),
+                str(v.get("estado") or "-"),
+            ])
 
-            elementos.append(Paragraph("<b>🏪 Reporte General - Mi Negocio</b>", titulo_style))
-            elementos.append(Paragraph(f"Fecha de emisión: {date.today().strftime('%d/%m/%Y')}", sub_style))
-
-            # Tabla Resumen
-            r = resumen()
-            data_resumen = [
-                ["Indicador Financiero", "Monto"],
-                ["Capital Inicial", money(r["capital"])],
-                ["Total Vendido", money(r["vendido"])],
-                ["Total Cobrado", money(r["cobrado"])],
-                ["Por Cobrar (Fiados)", money(r["por_cobrar"])],
-                ["Gastos Totales", money(r["gastos"])],
-                ["Ganancia Neta", money(r["ganancia"])],
-                ["Dinero en Caja Actual", money(r["caja"])],
-            ]
-
-            t_resumen = Table(data_resumen, colWidths=[280, 200])
-            t_resumen.setStyle(
+        if len(data_ventas) > 1:
+            t_ventas = Table(data_ventas, colWidths=[100, 200, 90, 90])
+            t_ventas.setStyle(
                 TableStyle(
                     [
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#004D40")),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0288D1")),
                         ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
                         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+                        ("ALIGN", (3, 0), (3, -1), "CENTER"),
                         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
                     ]
                 )
             )
-            elementos.append(t_resumen)
+            elementos.append(t_ventas)
+        else:
+            elementos.append(Paragraph("No hay ventas registradas aún.", styles["Normal"]))
 
-            # Tabla de Ventas Recientes
-            elementos.append(Paragraph("<b>Últimas Ventas</b>", h2_style))
-            data_ventas = [["Fecha", "Cliente", "Total", "Estado"]]
-            for v in estado["ventas"][:15]:
-                data_ventas.append([v["fecha"], v["cliente"], money(v["total"]), v["estado"]])
+        doc.build(elementos)
+        return buf.getvalue()
 
-            if len(data_ventas) > 1:
-                t_ventas = Table(data_ventas, colWidths=[100, 200, 90, 90])
-                t_ventas.setStyle(
-                    TableStyle(
-                        [
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0288D1")),
-                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                            ("ALIGN", (2, 0), (2, -1), "RIGHT"),
-                            ("ALIGN", (3, 0), (3, -1), "CENTER"),
-                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
-                        ]
-                    )
-                )
-                elementos.append(t_ventas)
-            else:
-                elementos.append(Paragraph("No hay ventas registradas aún.", styles["Normal"]))
+    def mostrar_enlace_pdf(url: str):
+        def abrir(e):
+            page.launch_url(url)
 
-            doc.build(elementos)
+        def copiar(e):
+            page.set_clipboard(url)
+            aviso("Enlace copiado 📋")
 
-            # Intentar abrir con el visor de PDF nativo del teléfono
-            page.launch_url(f"file://{ruta_pdf}")
-            aviso("PDF generado correctamente 📄")
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Reporte listo 📄"),
+            content=ft.Text(
+                "Se abre en tu navegador. Desde ahí puedes descargarlo, compartirlo o imprimirlo. "
+                "El enlace funciona durante 1 hora.",
+                size=14,
+            ),
+            actions=[
+                ft.TextButton("Cerrar", on_click=lambda e: page.close(dlg)),
+                ft.OutlinedButton("Copiar enlace", icon=ft.Icons.COPY, on_click=copiar),
+                ft.FilledButton("Abrir PDF", icon=ft.Icons.OPEN_IN_NEW, on_click=abrir, bgcolor=ft.Colors.TEAL_800),
+            ],
+        )
+        page.open(dlg)
 
+    async def generar_pdf_reporte(e=None):
+        """PDF en memoria -> Supabase Storage -> enlace https firmado.
+        Un archivo guardado en el caché privado de la app NO es accesible
+        para otras apps en Android; por eso se sirve por URL."""
+        aviso("Generando PDF...")
+        try:
+            r = resumen()
+            ventas = list(estado["ventas"][:15])
+            datos = await asyncio.to_thread(construir_pdf_bytes, r, ventas)
+
+            nombre = f"Reporte_Mi_Negocio_{datetime.now():%Y%m%d_%H%M%S}.pdf"
+            bucket = client.storage.from_(BUCKET_REPORTES)
+            await bucket.upload(nombre, datos, {"content-type": "application/pdf", "upsert": "true"})
+
+            firmado = await bucket.create_signed_url(nombre, 3600)
+            url = firmado.get("signedURL") or firmado.get("signedUrl") or ""
+            if not url:
+                raise ValueError("Supabase no devolvió el enlace firmado")
+            if not url.startswith("http"):
+                url = f"{SUPABASE_URL}/storage/v1{url}"
+
+            mostrar_enlace_pdf(url)
         except Exception as ex:
-            aviso(f"Error al generar PDF: {ex}", True)
+            aviso(
+                f"No se pudo generar el PDF: {ex}. "
+                f"Verifica que exista el bucket '{BUCKET_REPORTES}' y sus políticas (storage_setup.sql).",
+                True,
+            )
 
     def mostrar_ticket_modal(e=None):
         r = resumen()
@@ -339,13 +396,17 @@ async def main(page: ft.Page):
             spacing=6,
         )
 
+        async def descargar(e):
+            page.close(dlg)
+            await generar_pdf_reporte()
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Resumen Digital"),
             content=contenido_ticket,
             actions=[
                 ft.TextButton("Cerrar", on_click=lambda e: page.close(dlg)),
-                ft.FilledButton("Descargar PDF", icon=ft.Icons.PICTURE_AS_PDF, on_click=generar_pdf_reporte, bgcolor=ft.Colors.TEAL_800),
+                ft.FilledButton("Descargar PDF", icon=ft.Icons.PICTURE_AS_PDF, on_click=descargar, bgcolor=ft.Colors.TEAL_800),
             ],
         )
         page.open(dlg)
@@ -418,7 +479,7 @@ async def main(page: ft.Page):
         if not v_producto.value or not cant or cant <= 0 or prec is None or prec < 0:
             aviso("Selecciona producto, cantidad y precio válido", True)
             return
-        
+
         carrito_actual.append({
             "prod": v_producto.value,
             "cant": cant,
@@ -502,13 +563,13 @@ async def main(page: ft.Page):
 
     def abrir_dialogo_abono(venta, saldo_pendiente):
         input_monto = campo("Monto que te paga hoy (S/)", value=f"{saldo_pendiente:g}", keyboard_type=ft.KeyboardType.NUMBER)
-        
+
         async def confirmar_pago(e):
             monto_abono = round(num(input_monto.value, 0.0), 2)
             if monto_abono <= 0 or monto_abono > saldo_pendiente + 0.01:
                 aviso("Ingresa un monto válido que no exceda la deuda", True)
                 return
-            
+
             page.close(dlg)
             try:
                 await client.table("pagos").insert({
@@ -517,9 +578,9 @@ async def main(page: ft.Page):
                     "monto": monto_abono
                 }).execute()
 
-                pagos_previos = round(sum(p["monto"] for p in estado["pagos"] if p["venta_id"] == venta["id"]), 2)
+                pagos_previos = pagos_por_venta.get(venta["id"], 0.0)
                 nuevo_total_pagado = round(pagos_previos + monto_abono, 2)
-                nuevo_estado = "PAGADO" if nuevo_total_pagado >= round(venta["total"] - 0.01, 2) else "PARCIAL"
+                nuevo_estado = "PAGADO" if nuevo_total_pagado >= round((venta["total"] or 0) - 0.01, 2) else "PARCIAL"
 
                 await client.table("ventas_v2").update({"estado": nuevo_estado}).eq("id", venta["id"]).execute()
                 aviso("¡Pago/Abono registrado correctamente! 💸")
@@ -548,15 +609,16 @@ async def main(page: ft.Page):
             return
         items = []
         for v in estado["ventas"][:LIMITE_LISTA]:
-            pagos_hechos = round(sum(p["monto"] for p in estado["pagos"] if p["venta_id"] == v["id"]), 2)
-            falta = round(v["total"] - pagos_hechos, 2)
+            total_v = v["total"] or 0
+            pagos_hechos = pagos_por_venta.get(v["id"], 0.0)
+            falta = round(total_v - pagos_hechos, 2)
             pagado_completo = v["estado"] == "PAGADO" or falta <= 0.01
 
             acciones_row = [
                 ft.IconButton(
                     ft.Icons.DELETE_OUTLINE,
                     icon_size=24,
-                    on_click=lambda e, i=v["id"], t=f"{v['cliente']} · {money(v['total'])}":
+                    on_click=lambda e, i=v["id"], t=f"{v['cliente']} · {money(total_v)}":
                         confirmar_borrado("ventas_v2", i, t),
                 )
             ]
@@ -586,7 +648,7 @@ async def main(page: ft.Page):
                                     ),
                                     title=ft.Text(f"{v['cliente']}", weight=ft.FontWeight.W_500, size=15),
                                     subtitle=ft.Text(f"{v['fecha']} · Estado: {v['estado']}" + (f" (Falta {money(falta)})" if falta > 0.01 else "")),
-                                    trailing=ft.Text(money(v["total"]), size=16, weight=ft.FontWeight.BOLD),
+                                    trailing=ft.Text(money(total_v), size=16, weight=ft.FontWeight.BOLD),
                                 ),
                                 ft.Row(acciones_row, alignment=ft.MainAxisAlignment.SPACE_BETWEEN if len(acciones_row) > 1 else ft.MainAxisAlignment.END),
                             ],
@@ -736,7 +798,7 @@ async def main(page: ft.Page):
             return
 
         def editar(p):
-            p_nombre.value, p_precio.value, p_costo.value = p["nombre"], f"{p['precio']:g}", f"{(p['costo'] or 0):g}"
+            p_nombre.value, p_precio.value, p_costo.value = p["nombre"], f"{(p['precio'] or 0):g}", f"{(p['costo'] or 0):g}"
             page.update()
 
         lista_productos.controls = [
@@ -801,58 +863,103 @@ async def main(page: ft.Page):
         ], spacing=10))),
         ft.Card(content=ft.Container(padding=14, content=ft.Column([
             ft.Text("Reportes y Comprobantes", size=18, weight=ft.FontWeight.BOLD),
-            ft.Text("Genera un resumen digital rápido en pantalla o descarga un documento PDF.", size=13, color=ft.Colors.GREY_700),
+            ft.Text("Ve un resumen rápido en pantalla o genera un PDF que se abre en tu navegador para descargar o compartir.", size=13, color=ft.Colors.GREY_700),
             ft.Row([
                 ft.FilledButton("Ver Ticket Digital", icon=ft.Icons.RECEIPT_LONG, on_click=mostrar_ticket_modal, bgcolor=ft.Colors.TEAL_800, expand=True),
+            ]),
+            ft.Row([
+                ft.OutlinedButton("Generar PDF", icon=ft.Icons.PICTURE_AS_PDF, on_click=generar_pdf_reporte, expand=True),
             ]),
         ], spacing=10))),
     ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
 
     # ======================================================================
-    #                      REFRESCO Y CONTROL DE CONEXIÓN
+    #                      REFRESCO, CACHÉ Y CONTROL DE CONEXIÓN
     # ======================================================================
+    def pintar_todo():
+        recalcular_indices()
+        pintar_tarjetas()
+        pintar_ventas()
+        pintar_gastos()
+        pintar_productos()
+
+        nombres = [p["nombre"] for p in sorted(estado["productos"], key=lambda x: x["nombre"].lower())]
+        v_producto.options = [ft.dropdown.Option(n) for n in nombres]
+        if v_producto.value not in nombres:
+            v_producto.value = None
+            v_precio.value = ""
+
+        if not c_capital.value:
+            c_capital.value = f"{estado['capital']:g}"
+        page.update()
+
+    async def guardar_cache():
+        try:
+            await page.client_storage.set_async(CLAVE_CACHE, json.dumps(estado))
+        except Exception:
+            pass  # el caché es solo una ayuda; nunca debe romper la app
+
+    async def cargar_cache() -> bool:
+        try:
+            raw = await page.client_storage.get_async(CLAVE_CACHE)
+            if not raw:
+                return False
+            datos = json.loads(raw)
+            for k in estado:
+                if k in datos:
+                    estado[k] = datos[k]
+            return True
+        except Exception:
+            return False
+
     async def refrescar():
         nonlocal carga_inicial
         async with lock:
             try:
-                cfg = await client.table("config").select("valor").eq("clave", "capital").execute()
+                # 5 consultas en paralelo y solo con las columnas necesarias
+                cfg, prods, ventas, pagos, gastos = await asyncio.gather(
+                    client.table("config").select("valor").eq("clave", "capital").execute(),
+                    traer_todo(client, "productos"),
+                    traer_todo(client, "ventas_v2", "id,fecha,cliente,total,estado"),
+                    traer_todo(client, "pagos", "id,venta_id,monto"),
+                    traer_todo(client, "gastos", "id,fecha,concepto,monto"),
+                )
                 estado["capital"] = float(cfg.data[0]["valor"]) if cfg.data else 0.0
-                estado["productos"] = await traer_todo(client, "productos")
-                estado["ventas"] = await traer_todo(client, "ventas_v2")
-                estado["pagos"] = await traer_todo(client, "pagos")
-                estado["gastos"] = await traer_todo(client, "gastos")
+                estado["productos"], estado["ventas"] = prods, ventas
+                estado["pagos"], estado["gastos"] = pagos, gastos
+                ultimo_refresco["t"] = time.monotonic()
                 set_conexion(True)
             except Exception:
                 set_conexion(False)
                 if carga_inicial:
-                    mensaje = ft.Text("No se pudieron cargar los datos. Toca actualizar para reintentar.", color=ft.Colors.GREY_700)
-                    tarjetas.controls = [mensaje]
-                    lista_ventas.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
-                    lista_gastos.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
-                    lista_productos.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
+                    mensaje = "No se pudieron cargar los datos. Toca actualizar para reintentar."
+                    tarjetas.controls = [ft.Text(mensaje, color=ft.Colors.GREY_700)]
+                    lista_ventas.controls = [ft.Text(mensaje, color=ft.Colors.GREY_700)]
+                    lista_gastos.controls = [ft.Text(mensaje, color=ft.Colors.GREY_700)]
+                    lista_productos.controls = [ft.Text(mensaje, color=ft.Colors.GREY_700)]
                     carga_inicial = False
                     page.update()
                 return
 
-            pintar_tarjetas()
-            pintar_ventas()
-            pintar_gastos()
-            pintar_productos()
-
-            nombres = [p["nombre"] for p in sorted(estado["productos"], key=lambda x: x["nombre"].lower())]
-            v_producto.options = [ft.dropdown.Option(n) for n in nombres]
-
-            if v_producto.value not in nombres:
-                v_producto.value = None
-                v_precio.value = ""
-
-            if not c_capital.value:
-                c_capital.value = f"{estado['capital']:g}"
+            pintar_todo()
             carga_inicial = False
-            page.update()
+            await guardar_cache()
+
+    # --- Tiempo real con debounce: varios eventos seguidos = una sola recarga ---
+    pendiente = {"f": None}
+
+    async def refresco_diferido():
+        await asyncio.sleep(1.5)
+        # Si ya refrescamos hace poco (p. ej. tras guardar), no repetir
+        if time.monotonic() - ultimo_refresco["t"] < 2.0:
+            return
+        await refrescar()
 
     def hay_cambio(payload):
-        page.run_task(refrescar)
+        f = pendiente["f"]
+        if f is not None and not f.done():
+            return
+        pendiente["f"] = page.run_task(refresco_diferido)
 
     async def suscribir_tiempo_real():
         try:
@@ -864,9 +971,11 @@ async def main(page: ft.Page):
             set_conexion(False)
 
     async def sondeo():
+        # Respaldo por si el websocket se cae; ya no cada 20 s
         while True:
-            await asyncio.sleep(20)
-            await refrescar()
+            await asyncio.sleep(INTERVALO_SONDEO)
+            if time.monotonic() - ultimo_refresco["t"] >= INTERVALO_SONDEO * 0.66:
+                await refrescar()
 
     tabs = ft.Tabs(
         selected_index=0,
@@ -907,8 +1016,14 @@ async def main(page: ft.Page):
         )
     )
 
+    # Pintado instantáneo con los últimos datos guardados; luego se actualiza por red
+    if await cargar_cache():
+        pintar_todo()
+        carga_inicial = False
+
+    # Nada de esto bloquea el arranque: todo corre en segundo plano
     page.run_task(refrescar)
-    await suscribir_tiempo_real()
+    page.run_task(suscribir_tiempo_real)
     page.run_task(sondeo)
 
 

@@ -32,13 +32,17 @@ jobs:
       - name: Instalar Flet y dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install "flet==0.28.3" supabase reportlab openpyxl
+          pip install "flet==0.28.3" supabase reportlab
 
       - name: Compilar APK
         run: |
-          flet build apk --module-name mi_negocio
+          # --split-per-abi genera un APK por arquitectura (mas liviano).
+          # Para tu telefono instala el que termina en arm64-v8a.
+          # Opcional (verifica con `flet build -h` si tu version los acepta):
+          #   --compile-app --compile-packages --cleanup-app --cleanup-packages
+          flet build apk --module-name mi_negocio --split-per-abi
 
-      - name: Subir archivo APK listo para descargar
+      - name: Subir archivos APK listos para descargar
         uses: actions/upload-artifact@v4
         with:
           name: Mi_Negocio_APK

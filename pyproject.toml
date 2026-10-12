@@ -5,6 +5,5 @@ description = "App de gestion para Mi Negocio"
 dependencies = [
     "flet==0.28.3",
     "supabase",
-    "reportlab",
-    "openpyxl"
+    "reportlab"
 ]

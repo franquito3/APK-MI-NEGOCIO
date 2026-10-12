@@ -46,6 +46,7 @@
 
 🗄️ Configuración de la Base de Datos (Supabase)
 Para inicializar la estructura de datos, ejecuta el siguiente script en el SQL Editor de tu panel de Supabase:
+```
 -- 1. Crear tablas
 create table if not exists config (
     clave text primary key,
@@ -105,22 +106,28 @@ create policy "acceso_total" on gastos for all using (true) with check (true);
 create policy "acceso_total" on ventas_v2 for all using (true) with check (true);
 create policy "acceso_total" on venta_items for all using (true) with check (true);
 create policy "acceso_total" on pagos for all using (true) with check (true);
+```
 
 💻 Ejecución en Desarrollo (Local)
 Clonar el repositorio:
 
 Bash
+```
 git clone [https://github.com/franquito3/APK-MI-NEGOCIO.git](https://github.com/franquito3/APK-MI-NEGOCIO.git)
 cd APK-MI-NEGOCIO
+```
 Instalar dependencias:
 
 Bash
+```
 pip install "flet==0.28.3" "supabase>=2.9" reportlab openpyxl
+```
 Ejecutar la app:
 
 Bash
+```
 python mi_negocio.py
-
+```
 📱 Compilación del APK (Android)
 El proyecto incluye un pipeline automatizado con GitHub Actions. Cada vez que realizas un git push a la rama principal (main), GitHub compila automáticamente el APK instalable.
 

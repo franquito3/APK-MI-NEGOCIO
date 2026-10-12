@@ -1,11 +1,51 @@
-🏪 Mi Negocio - Gestión de Ventas y FinanzasMi Negocio es una aplicación móvil moderna desarrollada en Python con Flet y respaldada por Supabase. Está optimizada para la gestión rápida de ventas al contado y al crédito (fiados), control de productos, registro de gastos e historial de abonos en tiempo real.🚀 Características Principales🛒 Ventas Multiproducto (Carrito): Registra varios ítems en un solo ticket de venta con cálculo de subtotales automático.💸 Gestión de Deudas y Abonos Parciales: Controla quién te debe y registra abonos en efectivo o yape hasta cancelar la cuenta.⚡ Sincronización en Tiempo Real: Actualización instantánea en múltiples dispositivos mediante canales de Supabase.📄 Tickets Digitales y Exportación PDF: Generación de comprobantes en PDF estilizados con reportlab y opción de compartir el resumen por WhatsApp.📶 Estado de Conexión en Vivo: Indicador flotante que muestra si la app está en línea (🟢 Conectado) o sin red (🔴 Sin internet).⏳ Experiencia Fluida: Botones con estados de carga (loaders) para evitar registros duplicados por doble clic.🛠️ Tecnologías UtilizadasComponenteTecnologíaFrontend / GUIFlet v0.28.3Base de Datos & RealtimeSupabase (PostgreSQL)Generación de PDFReportLabReportes ExcelOpenPyXLCompilación APKGitHub Actions + Flutter Engine🎨 Estructura del ProyectoPlaintext📁 mi-negocio/
+# 🏪 Mi Negocio - Gestión de Ventas y Finanzas
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Flet](https://img.shields.io/badge/Flet-v0.28.3-00B2A9?style=for-the-badge&logo=flutter&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)
+![Android](https://img.shields.io/badge/Android-APK%20Ready-3DDC84?style=for-the-badge&logo=android&logoColor=white)
+
+**Mi Negocio** es una aplicación móvil moderna desarrollada en Python con **Flet** y respaldada por **Supabase**. Está optimizada para la gestión rápida de ventas al contado y al crédito (fiados), control de productos, registro de gastos e historial de abonos en tiempo real.
+
+---
+
+## 🚀 Características Principales
+
+* 🛒 **Ventas Multiproducto (Carrito):** Registra varios ítems en un solo ticket de venta con cálculo de subtotales automático.
+* 💸 **Gestión de Deudas y Abonos Parciales:** Controla quién te debe y registra abonos en efectivo o yape hasta cancelar la cuenta.
+* ⚡ **Sincronización en Tiempo Real:** Actualización instantánea en múltiples dispositivos mediante canales de Supabase.
+* 📄 **Tickets Digitales y Exportación PDF:** Generación de comprobantes en PDF estilizados con `reportlab` y opción de compartir el resumen por WhatsApp.
+* 📶 **Estado de Conexión en Vivo:** Indicador flotante que muestra si la app está en línea (`🟢 Conectado`) o sin red (`🔴 Sin internet`).
+* ⏳ **Experiencia Fluida:** Botones con estados de carga (*loaders*) para evitar registros duplicados por doble clic.
+
+---
+
+## 🛠️ Tecnologías Utilizadas
+
+| Componente | Tecnología |
+| :--- | :--- |
+| **Frontend / GUI** | [Flet v0.28.3](https://flet.dev/) |
+| **Base de Datos & Realtime** | [Supabase (PostgreSQL)](https://supabase.com/) |
+| **Generación de PDF** | [ReportLab](https://www.reportlab.com/) |
+| **Reportes Excel** | [OpenPyXL](https://openpyxl.readthedocs.io/) |
+| **Compilación APK** | GitHub Actions + Flutter Engine |
+
+---
+
+## 🎨 Estructura del Proyecto
+
+```text
+📁 APK-MI-NEGOCIO/
 ├── 📁 .github/
 │   └── 📁 workflows/
-│       └── 📄 build.yml      # Workflow de GitHub Actions para compilar APK
-├── 📄 mi_negocio.py          # Código fuente principal de la aplicación
-├── 📄 pyproject.toml         # Configuración de dependencias del proyecto
-└── 📄 README.md              # Documentación del repositorio
-🗄️ Configuración de la Base de Datos (Supabase)Para inicializar la estructura de datos, ejecuta el siguiente script en el SQL Editor de tu panel de Supabase:SQL-- 1. Crear tablas
+│       └── 📄 build.yml
+├── 📄 mi_negocio.py
+├── 📄 pyproject.toml
+└── 📄 README.md
+
+🗄️ Configuración de la Base de Datos (Supabase)
+Para inicializar la estructura de datos, ejecuta el siguiente script en el SQL Editor de tu panel de Supabase:
+-- 1. Crear tablas
 create table if not exists config (
     clave text primary key,
     valor text
@@ -64,8 +104,23 @@ create policy "acceso_total" on gastos for all using (true) with check (true);
 create policy "acceso_total" on ventas_v2 for all using (true) with check (true);
 create policy "acceso_total" on venta_items for all using (true) with check (true);
 create policy "acceso_total" on pagos for all using (true) with check (true);
-💻 Ejecución en Desarrollo (Local)Clonar el repositorio:Bashgit clone https://github.com/TU_USUARIO/TU_REPOSITORIO.git
-cd TU_REPOSITORIO
-Instalar dependencias:Bashpip install "flet==0.28.3" "supabase>=2.9" reportlab openpyxl
-Ejecutar la app:Bashpython mi_negocio.py
-📱 Compilación del APK (Android)El proyecto incluye un pipeline automatizado con GitHub Actions. Cada vez que realizas un git push a la rama principal (main), GitHub compila automáticamente el APK instalable.Puedes descargar el archivo .apk final desde la pestaña Actions en la sección Artifacts de tu repositorio.
+
+💻 Ejecución en Desarrollo (Local)
+Clonar el repositorio:
+
+Bash
+git clone [https://github.com/franquito3/APK-MI-NEGOCIO.git](https://github.com/franquito3/APK-MI-NEGOCIO.git)
+cd APK-MI-NEGOCIO
+Instalar dependencias:
+
+Bash
+pip install "flet==0.28.3" "supabase>=2.9" reportlab openpyxl
+Ejecutar la app:
+
+Bash
+python mi_negocio.py
+
+📱 Compilación del APK (Android)
+El proyecto incluye un pipeline automatizado con GitHub Actions. Cada vez que realizas un git push a la rama principal (main), GitHub compila automáticamente el APK instalable.
+
+Puedes descargar el archivo .apk final desde la pestaña Actions en la sección Artifacts de tu repositorio.

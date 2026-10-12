@@ -42,6 +42,7 @@
 ├── 📄 mi_negocio.py
 ├── 📄 pyproject.toml
 └── 📄 README.md
+```
 
 🗄️ Configuración de la Base de Datos (Supabase)
 Para inicializar la estructura de datos, ejecuta el siguiente script en el SQL Editor de tu panel de Supabase:

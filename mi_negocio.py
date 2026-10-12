@@ -1,5 +1,5 @@
 """
-Mi Negocio - Flet + Supabase (Tiempo Real + Botón Recargar + Lógica Blindada)
+Mi Negocio - Flet + Supabase (Generación de PDF y Ticket Digital)
 """
 import asyncio
 import os
@@ -55,10 +55,27 @@ async def main(page: ft.Page):
     page.bgcolor = ft.Colors.BLUE_GREY_50
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
 
+    page.add(
+        ft.Container(
+            expand=True,
+            content=ft.Column(
+                [
+                    ft.ProgressRing(color=ft.Colors.TEAL_700),
+                    ft.Text("Iniciando Mi Negocio...", color=ft.Colors.BLUE_GREY_700),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=16,
+            ),
+        )
+    )
+    page.update()
+
     client: AsyncClient = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
 
     # Estado de la app
     estado = {"capital": 0.0, "productos": [], "ventas": [], "pagos": [], "gastos": []}
+    carga_inicial = True
     carrito_actual = []
     lock = asyncio.Lock()
 
@@ -71,6 +88,7 @@ async def main(page: ft.Page):
         padding=ft.padding.symmetric(horizontal=8, vertical=4),
         border_radius=12,
     )
+    
 
     def set_conexion(online: bool):
         if online:
@@ -138,7 +156,31 @@ async def main(page: ft.Page):
             ),
         )
 
-    tarjetas = ft.Column(spacing=6)
+    def skeleton_card():
+        return ft.Card(
+            content=ft.Container(
+                padding=12,
+                content=ft.Column(
+                    [
+                        ft.Container(width=110, height=12, bgcolor=ft.Colors.GREY_300, border_radius=6),
+                        ft.Container(width=180, height=22, bgcolor=ft.Colors.GREY_200, border_radius=6),
+                    ],
+                    spacing=8,
+                ),
+            )
+        )
+
+    def skeleton_list(cantidad=3):
+        return [skeleton_card() for _ in range(cantidad)]
+
+    tarjetas = ft.Column(
+        [
+            ft.Row([ft.Container(skeleton_card(), expand=True)]),
+            ft.Row([ft.Container(skeleton_card(), expand=True), ft.Container(skeleton_card(), expand=True)], spacing=6),
+            ft.Row([ft.Container(skeleton_card(), expand=True), ft.Container(skeleton_card(), expand=True)], spacing=6),
+        ],
+        spacing=6,
+    )
 
     def pintar_tarjetas():
         r = resumen()
@@ -187,84 +229,126 @@ async def main(page: ft.Page):
             **kw
         )
 
-    def boton(texto, icono, accion, color=ft.Colors.TEAL_800):
-        return ft.Row([
-            ft.FilledButton(
-                texto,
-                icon=icono,
-                on_click=accion,
-                height=48,
-                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=color),
-                expand=True,
-            )
-        ])
-
-    # ==================== EXPORTACIÓN A EXCEL SIN ERRORES ====================
-    def exportar_excel(e=None):
+    # ==================== GENERADOR DE PDF Y TICKET DIGITAL ====================
+    async def generar_pdf_reporte(e=None):
         try:
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            from openpyxl.utils import get_column_letter
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-            wb = openpyxl.Workbook()
-            HEADER_FILL = PatternFill(start_color="004D40", end_color="004D40", fill_type="solid")
-            HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-            TITLE_FONT = Font(name="Calibri", size=16, bold=True, color="004D40")
-            BOLD_FONT = Font(name="Calibri", size=11, bold=True)
-            THIN_BORDER = Border(left=Side(style='thin', color='DDDDDD'), right=Side(style='thin', color='DDDDDD'), top=Side(style='thin', color='DDDDDD'), bottom=Side(style='thin', color='DDDDDD'))
-            FORMATO_MONEDA = '"S/" #,##0.00'
+            nombre_pdf = f"Reporte_Mi_Negocio_{date.today().strftime('%Y%m%d')}.pdf"
+            ruta_pdf = os.path.join(tempfile.gettempdir(), nombre_pdf)
 
-            # 1. Resumen
-            ws_resumen = wb.active
-            ws_resumen.title = "Resumen General"
-            ws_resumen.views.sheetView[0].showGridLines = True
-            ws_resumen.append(["REPORTE GENERAL DEL NEGOCIO"])
-            ws_resumen.cell(row=1, column=1).font = TITLE_FONT
-            ws_resumen.append([f"Fecha de emisión: {date.today()}"])
-            ws_resumen.append([])
-            ws_resumen.append(["Indicador Financiero", "Monto"])
+            doc = SimpleDocTemplate(
+                ruta_pdf,
+                pagesize=A4,
+                rightMargin=30,
+                leftMargin=30,
+                topMargin=30,
+                bottomMargin=30,
+            )
+            elementos = []
+            styles = getSampleStyleSheet()
+
+            # Estilos personalizados
+            titulo_style = ParagraphStyle("Titulo", parent=styles["Heading1"], fontSize=20, textColor=colors.HexColor("#004D40"), spaceAfter=10)
+            sub_style = ParagraphStyle("Subtitulo", parent=styles["Normal"], fontSize=10, textColor=colors.gray, spaceAfter=20)
+            h2_style = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=14, textColor=colors.HexColor("#004D40"), spaceBefore=15, spaceAfter=10)
+
+            elementos.append(Paragraph("<b>🏪 Reporte General - Mi Negocio</b>", titulo_style))
+            elementos.append(Paragraph(f"Fecha de emisión: {date.today().strftime('%d/%m/%Y')}", sub_style))
+
+            # Tabla Resumen
             r = resumen()
-            indicadores = [
-                ("Capital Inicial", r["capital"]),
-                ("Vendido Total", r["vendido"]),
-                ("Cobrado", r["cobrado"]),
-                ("Por Cobrar (Pendiente)", r["por_cobrar"]),
-                ("Gastos Totales", r["gastos"]),
-                ("Ganancia Neta", r["ganancia"]),
-                ("Dinero en Caja Actual", r["caja"]),
+            data_resumen = [
+                ["Indicador Financiero", "Monto"],
+                ["Capital Inicial", money(r["capital"])],
+                ["Total Vendido", money(r["vendido"])],
+                ["Total Cobrado", money(r["cobrado"])],
+                ["Por Cobrar (Fiados)", money(r["por_cobrar"])],
+                ["Gastos Totales", money(r["gastos"])],
+                ["Ganancia Neta", money(r["ganancia"])],
+                ["Dinero en Caja Actual", money(r["caja"])],
             ]
-            for ind, val in indicadores:
-                ws_resumen.append([ind, val])
-            for col in range(1, 3):
-                cell = ws_resumen.cell(row=4, column=col)
-                cell.fill, cell.font, cell.alignment = HEADER_FILL, HEADER_FONT, Alignment(horizontal="center", vertical="center")
-            for row in range(5, 5 + len(indicadores)):
-                c1, c2 = ws_resumen.cell(row=row, column=1), ws_resumen.cell(row=row, column=2)
-                c1.border, c2.border = THIN_BORDER, THIN_BORDER
-                c2.number_format = FORMATO_MONEDA
 
-            # 2. Ventas
-            ws_ventas = wb.create_sheet(title="Ventas")
-            ws_ventas.views.sheetView[0].showGridLines = True
-            ws_ventas.append(["Fecha", "Cliente", "Total", "Estado"])
-            for col in range(1, 5):
-                cell = ws_ventas.cell(row=1, column=col)
-                cell.fill, cell.font, cell.alignment = HEADER_FILL, HEADER_FONT, Alignment(horizontal="center", vertical="center")
-            for v in estado["ventas"]:
-                ws_ventas.append([v["fecha"], v["cliente"], v["total"], v["estado"]])
+            t_resumen = Table(data_resumen, colWidths=[280, 200])
+            t_resumen.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#004D40")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+                    ]
+                )
+            )
+            elementos.append(t_resumen)
 
-            for ws in [ws_resumen, ws_ventas]:
-                for col in ws.columns:
-                    max_len = max(len(str(cell.value or '')) for cell in col)
-                    col_letter = get_column_letter(col[0].column)
-                    ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            # Tabla de Ventas Recientes
+            elementos.append(Paragraph("<b>Últimas Ventas</b>", h2_style))
+            data_ventas = [["Fecha", "Cliente", "Total", "Estado"]]
+            for v in estado["ventas"][:15]:
+                data_ventas.append([v["fecha"], v["cliente"], money(v["total"]), v["estado"]])
 
-            nombre_archivo = f"Reporte_Mi_Negocio_{date.today().strftime('%Y%m%d')}.xlsx"
-            ruta_temp = os.path.join(tempfile.gettempdir(), nombre_archivo)
-            wb.save(ruta_temp)
-            aviso(f"Reporte generado en:\n{ruta_temp}")
+            if len(data_ventas) > 1:
+                t_ventas = Table(data_ventas, colWidths=[100, 200, 90, 90])
+                t_ventas.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0288D1")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+                            ("ALIGN", (3, 0), (3, -1), "CENTER"),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+                        ]
+                    )
+                )
+                elementos.append(t_ventas)
+            else:
+                elementos.append(Paragraph("No hay ventas registradas aún.", styles["Normal"]))
+
+            doc.build(elementos)
+
+            # Intentar abrir con el visor de PDF nativo del teléfono
+            page.launch_url(f"file://{ruta_pdf}")
+            aviso("PDF generado correctamente 📄")
+
         except Exception as ex:
-            aviso(f"Error al generar Excel: {ex}", True)
+            aviso(f"Error al generar PDF: {ex}", True)
+
+    def mostrar_ticket_modal(e=None):
+        r = resumen()
+        contenido_ticket = ft.Column(
+            [
+                ft.Text("🏪 TICKET RESUMEN", size=18, weight=ft.FontWeight.BOLD, color=VERDE),
+                ft.Text(f"Fecha: {date.today().strftime('%d/%m/%Y')}", size=12, color=ft.Colors.GREY_700),
+                ft.Divider(),
+                ft.Row([ft.Text("Dinero en Caja:"), ft.Text(money(r['caja']), weight=ft.FontWeight.BOLD)]),
+                ft.Row([ft.Text("Vendido Total:"), ft.Text(money(r['vendido']))]),
+                ft.Row([ft.Text("Cobrado:"), ft.Text(money(r['cobrado']))]),
+                ft.Row([ft.Text("Por Cobrar (Fiados):"), ft.Text(money(r['por_cobrar']), color=ft.Colors.RED_700)]),
+                ft.Row([ft.Text("Gastos Totales:"), ft.Text(money(r['gastos']))]),
+                ft.Row([ft.Text("Ganancia Neta:"), ft.Text(money(r['ganancia']), color=ft.Colors.GREEN_700, weight=ft.FontWeight.BOLD)]),
+            ],
+            tight=True,
+            spacing=6,
+        )
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Resumen Digital"),
+            content=contenido_ticket,
+            actions=[
+                ft.TextButton("Cerrar", on_click=lambda e: page.close(dlg)),
+                ft.FilledButton("Descargar PDF", icon=ft.Icons.PICTURE_AS_PDF, on_click=generar_pdf_reporte, bgcolor=ft.Colors.TEAL_800),
+            ],
+        )
+        page.open(dlg)
 
     # ======================================================================
     #                               VENTAS CON CARRITO
@@ -347,6 +431,7 @@ async def main(page: ft.Page):
         actualizar_ui_carrito()
 
     lista_ventas = ft.Column(spacing=0)
+    lista_ventas.controls = skeleton_list()
 
     btn_guardar_venta = ft.FilledButton(
         "Guardar venta completa",
@@ -364,12 +449,8 @@ async def main(page: ft.Page):
         total_venta = round(sum(i["subtotal"] for i in carrito_actual), 2)
         monto_pagado = round(num(v_monto_pago.value, 0.0), 2)
 
-        if monto_pagado < 0:
-            aviso("El monto pagado no puede ser negativo", True)
-            return
-
-        if monto_pagado > total_venta:
-            aviso("El monto pagado no puede superar el total", True)
+        if monto_pagado < 0 or monto_pagado > total_venta:
+            aviso("El monto pagado no es válido", True)
             return
 
         estado_pago = "PAGADO" if abs(monto_pagado - total_venta) < 0.01 else ("PARCIAL" if monto_pagado > 0 else "PENDIENTE")
@@ -379,7 +460,6 @@ async def main(page: ft.Page):
         page.update()
 
         try:
-            # 1. Insertar Cabecera
             res = await client.table("ventas_v2").insert({
                 "fecha": v_fecha.value or str(date.today()),
                 "cliente": (v_cliente.value or "").strip() or "Cliente General",
@@ -388,7 +468,6 @@ async def main(page: ft.Page):
             }).execute()
             venta_id = res.data[0]["id"]
 
-            # 2. Insertar Ítems
             items_db = [{
                 "venta_id": venta_id,
                 "producto": item["prod"],
@@ -398,7 +477,6 @@ async def main(page: ft.Page):
             } for item in carrito_actual]
             await client.table("venta_items").insert(items_db).execute()
 
-            # 3. Insertar Pago Inicial
             if monto_pagado > 0:
                 await client.table("pagos").insert({
                     "venta_id": venta_id,
@@ -422,7 +500,6 @@ async def main(page: ft.Page):
 
     btn_guardar_venta.on_click = guardar_venta
 
-    # ================= VENTANA FLOTANTE PARA REGISTRAR ABONOS =================
     def abrir_dialogo_abono(venta, saldo_pendiente):
         input_monto = campo("Monto que te paga hoy (S/)", value=f"{saldo_pendiente:g}", keyboard_type=ft.KeyboardType.NUMBER)
         
@@ -561,6 +638,7 @@ async def main(page: ft.Page):
     g_concepto = campo("¿En qué gastaste?", capitalization=ft.TextCapitalization.SENTENCES)
     g_monto = campo("Monto", keyboard_type=ft.KeyboardType.NUMBER)
     lista_gastos = ft.Column(spacing=0)
+    lista_gastos.controls = skeleton_list()
 
     btn_guardar_gasto = ft.FilledButton("Guardar gasto", icon=ft.Icons.ADD, height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800), expand=True)
 
@@ -624,6 +702,7 @@ async def main(page: ft.Page):
     p_precio = campo("Precio de venta", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
     p_costo = campo("Lo que me cuesta", keyboard_type=ft.KeyboardType.NUMBER, expand=True)
     lista_productos = ft.Column(spacing=0)
+    lista_productos.controls = skeleton_list()
 
     btn_guardar_producto = ft.FilledButton("Guardar producto", icon=ft.Icons.ADD, height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), bgcolor=ft.Colors.TEAL_800), expand=True)
 
@@ -721,9 +800,11 @@ async def main(page: ft.Page):
             ft.Row([btn_guardar_capital]),
         ], spacing=10))),
         ft.Card(content=ft.Container(padding=14, content=ft.Column([
-            ft.Text("Reportes y Exportación", size=18, weight=ft.FontWeight.BOLD),
-            ft.Text("Descarga un reporte detallado en Excel con tus ventas, gastos y resumen.", size=13, color=ft.Colors.GREY_700),
-            boton("Exportar a Excel", ft.Icons.TABLE_CHART, exportar_excel, color=ft.Colors.GREEN_800),
+            ft.Text("Reportes y Comprobantes", size=18, weight=ft.FontWeight.BOLD),
+            ft.Text("Genera un resumen digital rápido en pantalla o descarga un documento PDF.", size=13, color=ft.Colors.GREY_700),
+            ft.Row([
+                ft.FilledButton("Ver Ticket Digital", icon=ft.Icons.RECEIPT_LONG, on_click=mostrar_ticket_modal, bgcolor=ft.Colors.TEAL_800, expand=True),
+            ]),
         ], spacing=10))),
     ], scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
 
@@ -731,6 +812,7 @@ async def main(page: ft.Page):
     #                      REFRESCO Y CONTROL DE CONEXIÓN
     # ======================================================================
     async def refrescar():
+        nonlocal carga_inicial
         async with lock:
             try:
                 cfg = await client.table("config").select("valor").eq("clave", "capital").execute()
@@ -742,6 +824,14 @@ async def main(page: ft.Page):
                 set_conexion(True)
             except Exception:
                 set_conexion(False)
+                if carga_inicial:
+                    mensaje = ft.Text("No se pudieron cargar los datos. Toca actualizar para reintentar.", color=ft.Colors.GREY_700)
+                    tarjetas.controls = [mensaje]
+                    lista_ventas.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
+                    lista_gastos.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
+                    lista_productos.controls = [ft.Text(mensaje.value, color=ft.Colors.GREY_700)]
+                    carga_inicial = False
+                    page.update()
                 return
 
             pintar_tarjetas()
@@ -758,6 +848,7 @@ async def main(page: ft.Page):
 
             if not c_capital.value:
                 c_capital.value = f"{estado['capital']:g}"
+            carga_inicial = False
             page.update()
 
     def hay_cambio(payload):
@@ -789,6 +880,7 @@ async def main(page: ft.Page):
         ],
     )
 
+    page.controls.clear()
     page.add(
         ft.SafeArea(
             expand=True,

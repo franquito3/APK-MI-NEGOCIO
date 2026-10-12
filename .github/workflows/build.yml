@@ -32,7 +32,7 @@ jobs:
       - name: Instalar Flet y dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install "flet==0.28.3" supabase reportlab
+          pip install "flet==0.28.3" supabase reportlab openpyxl
 
       - name: Compilar APK
         run: |

@@ -1,14 +1,10 @@
 [project]
-name = "minegocio"
-version = "1.0.0"
-description = "App de Gestión de Negocio"
+name = "mi_negocio"
+version = "0.1.0"
+description = "App de gestion para Mi Negocio"
 dependencies = [
     "flet==0.28.3",
-    "supabase>=2.9",
-    "openpyxl>=3.1"
+    "supabase",
+    "reportlab",
+    "openpyxl"
 ]
-
-[tool.flet]
-main = "mi_negocio.py"
-product_name = "BISNES"
-icon = "assets/icon.jpg"
